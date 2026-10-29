@@ -370,7 +370,7 @@ describe.each(['libsql', ...(postgresUrl ? ['postgres'] : [])])('work item split
       expect(workItem, fixture.name).toMatchObject({ title: card.title, ...fixture.expected });
       expect(workItem!.id, fixture.name).not.toBe(id);
       for (const key of fixture.providerKeys) {
-        expect(workItem!.metadata?.[key], `${fixture.name}: work item ${key}`).toEqual(card.metadata![key]);
+        expect(workItem!.metadata?.[key], `${fixture.name}: work item ${key}`).toEqual(fixture.input.metadata[key]);
         expect(boardItem!.metadata ?? {}, `${fixture.name}: board item ${key}`).not.toHaveProperty(key);
       }
       for (const key of fixture.boardKeys) {

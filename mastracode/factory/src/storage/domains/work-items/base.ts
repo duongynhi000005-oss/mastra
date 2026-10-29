@@ -15,6 +15,7 @@ import type { CollectionSchema, CollectionWhere, FactoryStorageOps } from '@mast
 import { factoryDispatchFailureMetadata } from '../../../rules/dispatch-errors.js';
 import { externalSourceForWorkItem } from '../../../rules/types.js';
 import type { FactoryTriageType, WorkItemSource } from '../../../rules/types.js';
+import { splitCardMetadata, workItemProviderAdapter } from '../../../work-items/providers/index.js';
 import { migrateWorkItemSplit } from '../../../work-items/split-migration.js';
 import {
   WORK_ITEM_ACTIVITY_SCHEMA,
@@ -756,7 +757,7 @@ function toWorkItem(row: WorkItemDbRow): Card {
     stages: row.stages,
     stageHistory: row.stage_history,
     sessions: row.sessions,
-    metadata: row.metadata,
+    metadata: splitCardMetadata(row.metadata, workItemProviderAdapter(row.external_source).providerMetadataKeys).board,
     triageType: row.triage_type ?? null,
     autonomyArmedAt: row.autonomy_armed_at ?? null,
     plansPreapprovedAt: row.plans_preapproved_at ?? null,
@@ -1276,6 +1277,10 @@ export interface FactoryAttentionScope {
 const LIST_CACHE_TTL_MS = 60_000;
 const LIST_CACHE_MAX_PROJECTS = 100;
 
+type WorkItemSyncPatch = Partial<
+  Pick<ProviderWorkItemRow, 'title' | 'state' | 'labels' | 'author' | 'url' | 'key' | 'metadata' | 'parentWorkItemId'>
+>;
+
 export class WorkItemsStorage extends FactoryStorageDomain {
   /** Last full card list per project, valid while the project's board version is unchanged. */
   readonly #listCache = new Map<string, { version: string; takenAt: number; items: Card[] }>();
@@ -1360,36 +1365,97 @@ export class WorkItemsStorage extends FactoryStorageDomain {
     provider,
     externalId,
     patch,
+    expectedRevision,
   }: {
     orgId: string;
     factoryProjectId: string;
     provider: string;
     externalId: string;
-    patch: {
-      title?: string;
-      state?: string | null;
-      labels?: string[];
-      author?: string | null;
-      url?: string | null;
-      key?: string | null;
-      metadata?: Record<string, unknown> | null;
-      parentWorkItemId?: string | null;
-    };
+    patch: WorkItemSyncPatch | ((current: WorkItemDbRecord) => WorkItemSyncPatch);
+    expectedRevision?: number;
   }): Promise<void> {
-    const { parentWorkItemId, ...facts } = patch;
     await this.#withTransaction(async ops => {
       await ops.updateAtomic<WorkItemDbRecord>(
         FACTORY_WORK_ITEMS_SCHEMA.name,
         { org_id: orgId, factory_project_id: factoryProjectId, provider, external_id: externalId },
-        current => ({
-          ...facts,
-          ...(parentWorkItemId !== undefined ? { parent_work_item_id: parentWorkItemId } : {}),
-          revision: current.revision + 1,
-          synced_at: new Date(),
-          updated_at: new Date(),
-        }),
+        current => {
+          if (expectedRevision !== undefined && current.revision !== expectedRevision) {
+            throw new WorkItemUpdateConflictError('revision');
+          }
+          const { parentWorkItemId, ...facts } = typeof patch === 'function' ? patch(current) : patch;
+          return {
+            ...facts,
+            ...(parentWorkItemId !== undefined ? { parent_work_item_id: parentWorkItemId } : {}),
+            revision: current.revision + 1,
+            synced_at: new Date(),
+            updated_at: new Date(),
+          };
+        },
       );
     });
+  }
+
+  /** Apply an integration's source facts through its adapter; process stamps remain board writes. */
+  async syncCard({
+    orgId,
+    id,
+    userId,
+    patch,
+    expectedWorkItemRevision,
+  }: {
+    orgId: string;
+    id: string;
+    userId: string;
+    patch: { title?: string; metadata?: Record<string, unknown> | null };
+    expectedWorkItemRevision?: number;
+  }): Promise<{ item: Card; previous: WorkItemPriorState } | null> {
+    if (process.env.MASTRA_FACTORY_WORK_ITEM_SPLIT === 'dry-run') {
+      return this.update({ orgId, id, userId, patch });
+    }
+    const item = await this.get({ orgId, id });
+    if (!item) return null;
+    const adapter = workItemProviderAdapter(item.externalSource);
+    const split = splitCardMetadata(patch.metadata, adapter.providerMetadataKeys);
+    if (patch.title !== undefined || Object.keys(split.provider ?? {}).length > 0) {
+      await this.syncWorkItem({
+        orgId,
+        factoryProjectId: item.factoryProjectId,
+        provider: item.workItem.provider,
+        externalId: item.workItem.externalId,
+        expectedRevision: expectedWorkItemRevision,
+        patch: current => {
+          const facts = adapter.toWorkItem(
+            item.externalSource,
+            {
+              ...current.metadata,
+              ...split.provider,
+            },
+            { title: patch.title ?? current.title, boardItemId: item.id },
+          );
+          return {
+            title: facts.title,
+            key: facts.key,
+            url: facts.url,
+            state: facts.state,
+            labels: facts.labels,
+            author: facts.author,
+            metadata: facts.metadata,
+          };
+        },
+      });
+    }
+    const boardPatch = Object.fromEntries(
+      Object.entries(split.board ?? {}).filter(
+        ([key, value]) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(value),
+      ),
+    );
+    if (Object.keys(boardPatch).length > 0) {
+      return this.update({ orgId, id, userId, patch: { metadata: boardPatch } });
+    }
+    const refreshed = await this.get({ orgId, id });
+    return refreshed
+      ? { item: refreshed, previous: { stages: item.stages, sessionRoles: Object.keys(item.sessions) } }
+      : null;
   }
 
   async dangerouslyClearAll(): Promise<void> {
