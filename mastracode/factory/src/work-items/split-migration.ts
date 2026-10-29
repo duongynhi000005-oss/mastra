@@ -20,16 +20,17 @@ import { randomUUID } from 'node:crypto';
 import { UniqueViolationError } from '@mastra/core/storage';
 import type { FactoryStorage, FactoryStorageOps } from '@mastra/core/storage';
 
-import { WORK_ITEMS_SCHEMA } from '../storage/domains/work-items/base.js';
 import type { WorkItemDbRow } from '../storage/domains/work-items/base.js';
 import { bumpBoardVersions } from '../storage/domains/work-items/board-version.js';
 import type { BoardScope } from '../storage/domains/work-items/board-version.js';
+import { splitCardRows } from '../storage/domains/work-items/cards.js';
 import {
+  WORK_ITEMS_SCHEMA,
   FACTORY_BOARD_ITEMS_SCHEMA,
   FACTORY_WORK_ITEMS_SCHEMA,
+  FACTORY_BOARD_ITEM_TOMBSTONES_SCHEMA,
 } from '../storage/domains/work-items/work-item-schema.js';
 import type { BoardItemDbRecord, WorkItemDbRecord } from '../storage/domains/work-items/work-item-schema.js';
-import { splitCardMetadata, workItemProviderAdapter } from './providers/index.js';
 
 const LEGACY = WORK_ITEMS_SCHEMA.name;
 const WORK_ITEMS = FACTORY_WORK_ITEMS_SCHEMA.name;
@@ -81,68 +82,13 @@ function time(value: Date | string | null | undefined): number {
   return (value instanceof Date ? value : new Date(value)).getTime();
 }
 
-/** Split one legacy row. Throws when the row cannot be mapped onto a work item. */
-export function splitLegacyWorkItem(
+/** Split one legacy row, stamped with the legacy `updated_at` it was copied from. */
+function splitLegacyWorkItem(
   row: WorkItemDbRow,
-  { workItemId, revision }: { workItemId: string; revision?: number },
+  options: { workItemId: string; revision?: number },
 ): WorkItemSplitCard {
-  const adapter = workItemProviderAdapter(row.external_source ?? null);
-  const provider = adapter.toWorkItem(row.external_source ?? null, row.metadata, {
-    title: row.title,
-    boardItemId: row.id,
-  });
-  const metadata = splitCardMetadata(row.metadata, adapter.providerMetadataKeys);
-  return {
-    workItem: {
-      id: workItemId,
-      org_id: row.org_id,
-      factory_project_id: String(row.factory_project_id),
-      provider: provider.provider,
-      kind: provider.kind,
-      integration_id: provider.integrationId,
-      source_type: provider.sourceType,
-      workspace_id: provider.workspaceId,
-      external_id: provider.externalId,
-      source_key: provider.sourceKey,
-      url: provider.url,
-      key: provider.key,
-      title: provider.title,
-      state: provider.state,
-      labels: provider.labels,
-      author: provider.author,
-      // Factory's card-to-card link moves to the board item; legacy rows record no provider parent.
-      parent_work_item_id: null,
-      metadata: metadata.provider,
-      revision: 1,
-      synced_at: null,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-    },
-    boardItem: {
-      id: row.id,
-      org_id: row.org_id,
-      factory_project_id: String(row.factory_project_id),
-      work_item_id: workItemId,
-      board: row.board ?? null,
-      claim_key: row.claim_key ?? null,
-      parent_board_item_id: row.parent_work_item_id ?? null,
-      stages: row.stages,
-      stage_history: row.stage_history,
-      sessions: row.sessions,
-      metadata: metadata.board,
-      triage_type: row.triage_type ?? null,
-      autonomy_armed_at: row.autonomy_armed_at ?? null,
-      plans_preapproved_at: row.plans_preapproved_at ?? null,
-      accepted_at: row.accepted_at ?? null,
-      comment_count: row.comment_count ?? 0,
-      feed_activity_at: row.feed_activity_at ?? null,
-      revision: revision ?? row.revision,
-      created_by: row.created_by,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      migrated_from_updated_at: row.updated_at,
-    },
-  };
+  const card = splitCardRows(row, options);
+  return { ...card, boardItem: { ...card.boardItem, migrated_from_updated_at: row.updated_at } };
 }
 
 /**
@@ -265,8 +211,13 @@ export async function migrateWorkItemSplit(
     report.cards += page.length;
     for (const row of page) projects.add(`${row.org_id}\u0000${row.factory_project_id}`);
 
+    const tombstones = await ops.findMany<{ id: string }>(FACTORY_BOARD_ITEM_TOMBSTONES_SCHEMA.name, {
+      id: { in: page.map(row => row.id) },
+    });
+    const deleted = new Set(tombstones.map(row => row.id));
+    report.unchanged += deleted.size;
     const plan = planWorkItemSplit(
-      page,
+      page.filter(row => !deleted.has(row.id)),
       await migratedBoardItems(
         ops,
         page.map(row => row.id),
