@@ -245,8 +245,14 @@ export async function migrateWorkItemSplit(
           } catch (cardError) {
             if (!(cardError instanceof UniqueViolationError)) throw cardError;
             const raced = await migratedBoardItems(ops, [entry.card.boardItem.id]);
-            if (!raced.has(entry.card.boardItem.id)) throw cardError;
-            report.unchanged += 1;
+            if (!entry.recopy && raced.has(entry.card.boardItem.id)) {
+              report.unchanged += 1;
+            } else {
+              report.skipped.push({
+                id: entry.card.boardItem.id,
+                reason: `Conflicting source or claim: ${cardError.message}`,
+              });
+            }
           }
         }
       }
