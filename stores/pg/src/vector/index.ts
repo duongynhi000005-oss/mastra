@@ -849,7 +849,8 @@ export class PgVector extends MastraVector<PGVectorFilter> {
       // vectors in other clusters, returning fewer results than expected.
       const filterClause = filterQuery.trim().replace(/^WHERE\s+/i, '');
       const hasFilter = filterClause.length > 0;
-      const useIndexedOrder = indexInfo.type === 'hnsw' && !hasFilter && minScore <= 0;
+      const useIndexedOrder =
+        indexInfo.type === 'hnsw' && minScore <= 0 && (!hasFilter || this.supportsIterativeScan());
       const namespaceParam = filterValues.length + 1;
 
       const query = useIndexedOrder
@@ -862,6 +863,7 @@ export class PgVector extends MastraVector<PGVectorFilter> {
             ${includeVector ? ', embedding' : ''}
           FROM ${tableName}
           WHERE namespace = $${namespaceParam}
+          ${filterClause ? `AND (${filterClause})` : ''}
           ORDER BY ${distanceExpr}
           LIMIT $2
         )
