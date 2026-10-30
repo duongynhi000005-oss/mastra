@@ -1,5 +1,33 @@
 # @mastra/redis-streams
 
+## 0.6.0-alpha.0
+
+### Minor Changes
+
+- Idle topic streams now expire after 7 days by default. Previously `streamIdleTtlMs` defaulted to `0`, so a pubsub created without it never expired any stream. A production deployment built that way accumulated thousands of never-expiring conversation streams until Redis ran out of memory. ([#28968](https://github.com/mastra-ai/mastra/pull/28968))
+
+  Every write still refreshes the TTL, so a topic in active use never expires. If a grouped worker can be offline for more than 7 days while publishers are quiet, and must replay the backlog when it comes back, raise the TTL or turn expiry off:
+
+  ```typescript
+  // Before: streams created by this pubsub never expired
+  // After: they expire after 7 days without a write
+  new RedisStreamsPubSub({ url });
+
+  // To keep the old behavior, turn expiry off explicitly
+  new RedisStreamsPubSub({ url, streamIdleTtlMs: 0 });
+  ```
+
+  **Check your eviction policy before upgrading.** Under a `volatile-*` policy, Redis only evicts keys that have a TTL. Streams used to have none, so they were safe from eviction; now they can be evicted under memory pressure, losing events. Set `maxmemory-policy` to `noeviction`.
+
+  Existing streams created without a TTL only get one on their next write. See the reference docs for a runbook to reclaim them.
+
+  The pubsub also logs a warning once after connecting if the server has `maxmemory` set with any policy other than `noeviction`. Evicting policies (Amazon ElastiCache defaults to `volatile-lru`) delete live streams, consumer groups, and lease keys under memory pressure.
+
+### Patch Changes
+
+- Updated dependencies [[`278ecce`](https://github.com/mastra-ai/mastra/commit/278ecceb2d4f0200fb9b8a8d6e9f6cfcd39ac3ff), [`4c56da4`](https://github.com/mastra-ai/mastra/commit/4c56da456f13d104adfb5bb69ed0937a8c1ba59a), [`7b3f759`](https://github.com/mastra-ai/mastra/commit/7b3f759e080364820f785ed6c6b422db1a4a6366), [`cf4c4b6`](https://github.com/mastra-ai/mastra/commit/cf4c4b6e8b66b13696c9217f62aa42f38a9b873c), [`52265cb`](https://github.com/mastra-ai/mastra/commit/52265cba91aecebdcc45b2d95ef7b18b6d738d8b), [`3ee0f7b`](https://github.com/mastra-ai/mastra/commit/3ee0f7bddde204dc87e0e2351a750d54428ef70c), [`b79e61a`](https://github.com/mastra-ai/mastra/commit/b79e61a92d0982ba2daa25629576656d211753f8), [`292dd6c`](https://github.com/mastra-ai/mastra/commit/292dd6cd973f5821f943eb01ad081eefcb1285af), [`ba8b955`](https://github.com/mastra-ai/mastra/commit/ba8b955b1ad6022089feec253c111035e9e7b9b6), [`5480e7b`](https://github.com/mastra-ai/mastra/commit/5480e7b7caa5d8f8018d22f79e36a9a19697af4b), [`fbd5957`](https://github.com/mastra-ai/mastra/commit/fbd5957959481ffc030faa3ab2e3df35e085bc2d), [`0443fd5`](https://github.com/mastra-ai/mastra/commit/0443fd5137071cc64b0d2730d57bfb9398527410), [`49080fa`](https://github.com/mastra-ai/mastra/commit/49080fabe7a86b7fac94cdab2596b2d2b320e189), [`14290e1`](https://github.com/mastra-ai/mastra/commit/14290e18078712a02270ac45e50f49806624c4ce), [`69c79cf`](https://github.com/mastra-ai/mastra/commit/69c79cf07b6fc1ffe6f2f547729f1cb05bd54eca), [`8b781d0`](https://github.com/mastra-ai/mastra/commit/8b781d0308eec018e84b59809cc24b2953300300), [`c0918c0`](https://github.com/mastra-ai/mastra/commit/c0918c01b337947eeb54d5d1b3ab9ed0719bb4b7), [`690bd1b`](https://github.com/mastra-ai/mastra/commit/690bd1baee178d56a75994549c318e0089debdee), [`e77a7d9`](https://github.com/mastra-ai/mastra/commit/e77a7d910b7943368b4df6688e7645fffb6a8891), [`d102756`](https://github.com/mastra-ai/mastra/commit/d102756c708797722d95ee73ab11ba614f2f9ec8), [`80f2f21`](https://github.com/mastra-ai/mastra/commit/80f2f21133688844e34110da5c8f27b4ee37fb63), [`e9fc83e`](https://github.com/mastra-ai/mastra/commit/e9fc83e5d4427f49af147aec86eb3f7fcb6fb8ee), [`7d3dd2b`](https://github.com/mastra-ai/mastra/commit/7d3dd2b07b47d8cc5c52ccb97054e85ebed1619a), [`d9e26f4`](https://github.com/mastra-ai/mastra/commit/d9e26f485d2658a9dc84c0f20804e9a89a57d3a0)]:
+  - @mastra/core@1.81.0-alpha.2
+
 ## 0.5.7
 
 ### Patch Changes
