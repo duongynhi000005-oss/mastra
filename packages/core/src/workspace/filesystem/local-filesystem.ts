@@ -277,6 +277,12 @@ export class LocalFilesystem extends MastraFilesystem {
           continue;
         }
         currentIsDirectory = stat.isDirectory();
+        try {
+          currentPath = realpathSync.native(candidate);
+          continue;
+        } catch {
+          // Fallback to candidate if realpathSync.native fails
+        }
       } catch (error: unknown) {
         if (!isEnoentError(error)) throw error;
         currentIsDirectory = undefined;
